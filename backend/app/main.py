@@ -2,11 +2,42 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import pydicom
 
 from .config import settings
 from .database import init_default_users, ensure_storage_dirs, db
 from .pacs_sync import sync_from_pacs, generate_mock_pacs_data
+from .dicom_utils import _decode_dicom_str
 from .routers import auth, study, series, image, annotation, report, sync, admin
+
+
+def _check_dicom_chinese_valid(pacs_dir: str) -> bool:
+    if not os.path.isdir(pacs_dir):
+        return False
+
+    for root, dirs, files in os.walk(pacs_dir):
+        for filename in files:
+            if filename.lower().endswith(".dcm"):
+                file_path = os.path.join(root, filename)
+                try:
+                    ds = pydicom.dcmread(file_path, force=True)
+                    patient_name = str(ds.get("PatientName", ""))
+                    decoded = _decode_dicom_str(patient_name)
+
+                    has_chinese = any("\u4e00" <= c <= "\u9fff" for c in decoded)
+                    has_garbled = "\ufffd" in decoded or (
+                        patient_name
+                        and not has_chinese
+                        and any(ord(c) > 127 for c in patient_name)
+                    )
+
+                    if has_garbled and not has_chinese:
+                        return False
+                    if has_chinese:
+                        return True
+                except Exception:
+                    continue
+    return False
 
 
 @asynccontextmanager
@@ -22,7 +53,9 @@ async def lifespan(app: FastAPI):
                 has_dicom = True
                 break
 
-    if not has_dicom:
+    chinese_valid = _check_dicom_chinese_valid(pacs_dir) if has_dicom else False
+
+    if not has_dicom or not chinese_valid:
         generate_mock_pacs_data()
 
     sync_from_pacs()

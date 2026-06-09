@@ -121,6 +121,20 @@ def sync_from_pacs() -> SyncResult:
 
 def generate_mock_pacs_data() -> None:
     pacs_dir = settings.pacs_dir
+    storage_dir = settings.dicom_storage_dir
+
+    for dir_path in [pacs_dir, storage_dir]:
+        if os.path.isdir(dir_path):
+            for item in os.listdir(dir_path):
+                item_path = os.path.join(dir_path, item)
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception:
+                    pass
+
     os.makedirs(pacs_dir, exist_ok=True)
 
     for mod in MODALITIES:

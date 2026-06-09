@@ -3,7 +3,8 @@ import uuid
 import shutil
 import pydicom
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
-from pydicom.uid import generate_uid, ImplicitVRLittleEndian
+from pydicom.uid import generate_uid, ExplicitVRLittleEndian
+from pydicom.charset import decode_bytes
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -13,23 +14,68 @@ from .models import StudyInfo, SeriesInfo, ImageInfo, PatientInfo
 from .database import db
 
 
+CHINESE_CHARSETS = ["GB18030", "GBK", "GB2312", "UTF8", "ISO_IR 192"]
+
+
+def _decode_dicom_str(value, default_charset="GB18030") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        if "\ufffd" in value or any(ord(c) > 127 and ord(c) < 256 for c in value):
+            try:
+                raw_bytes = value.encode("latin-1", errors="ignore")
+                for cs in CHINESE_CHARSETS:
+                    try:
+                        decoded = raw_bytes.decode(cs)
+                        if decoded and "\ufffd" not in decoded:
+                            return decoded
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+            except Exception:
+                pass
+        return value
+    if isinstance(value, bytes):
+        for cs in CHINESE_CHARSETS:
+            try:
+                return value.decode(cs)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _safe_str(ds, tag, default="") -> str:
+    try:
+        val = ds.get(tag, default)
+        if val is None:
+            return default
+        if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
+            if len(val) > 0:
+                val = val[0]
+            else:
+                return default
+        return _decode_dicom_str(val)
+    except Exception:
+        return default
+
+
 def extract_dicom_info(file_path: str) -> Tuple[PatientInfo, StudyInfo, SeriesInfo, ImageInfo]:
     ds = pydicom.dcmread(file_path)
 
-    patient_id = str(ds.get("PatientID", "UNKNOWN"))
-    patient_name = str(ds.get("PatientName", "未知患者"))
-    patient_sex = str(ds.get("PatientSex", "")) or None
-    patient_age = str(ds.get("PatientAge", "")) or None
+    patient_id = _safe_str(ds, "PatientID", "UNKNOWN")
+    patient_name = _safe_str(ds, "PatientName", "未知患者")
+    patient_sex = _safe_str(ds, "PatientSex", "") or None
+    patient_age = _safe_str(ds, "PatientAge", "") or None
 
     study_uid = str(ds.StudyInstanceUID)
-    study_date = str(ds.get("StudyDate", ""))
-    study_time = str(ds.get("StudyTime", ""))
-    study_description = str(ds.get("StudyDescription", "")) or None
-    modality = str(ds.get("Modality", "UNKNOWN"))
+    study_date = _safe_str(ds, "StudyDate", "")
+    study_time = _safe_str(ds, "StudyTime", "")
+    study_description = _safe_str(ds, "StudyDescription", "") or None
+    modality = _safe_str(ds, "Modality", "UNKNOWN")
 
     series_uid = str(ds.SeriesInstanceUID)
     series_number = int(ds.get("SeriesNumber", 0))
-    series_description = str(ds.get("SeriesDescription", "")) or None
+    series_description = _safe_str(ds, "SeriesDescription", "") or None
 
     image_uid = str(ds.SOPInstanceUID)
     instance_number = int(ds.get("InstanceNumber", 0))
@@ -173,9 +219,13 @@ def generate_mock_dicom(
         file_meta = FileMetaDataset()
         file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
         file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
-        file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+        file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
-        ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\x00" * 128)
+        ds = FileDataset(
+            None, {}, file_meta=file_meta, preamble=b"\x00" * 128
+        )
+
+        ds.SpecificCharacterSet = "GB18030"
 
         ds.PatientID = patient_id
         ds.PatientName = patient_name
@@ -198,6 +248,8 @@ def generate_mock_dicom(
         ds.InstanceNumber = i + 1
         ds.StudyDescription = f"{modality} 检查"
         ds.SeriesDescription = series_description or f"{modality} 序列"
+        ds.InstitutionName = "模拟医院"
+        ds.ReferringPhysicianName = "王医生"
 
         ds.Rows = rows
         ds.Columns = columns
