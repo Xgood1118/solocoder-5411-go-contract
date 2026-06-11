@@ -7,7 +7,7 @@ import pydicom
 from .config import settings
 from .database import init_default_users, ensure_storage_dirs, db
 from .pacs_sync import sync_from_pacs, generate_mock_pacs_data
-from .dicom_utils import _decode_dicom_str
+from .dicom_utils import _safe_str
 from .routers import auth, study, series, image, annotation, report, sync, admin
 
 
@@ -21,20 +21,22 @@ def _check_dicom_chinese_valid(pacs_dir: str) -> bool:
                 file_path = os.path.join(root, filename)
                 try:
                     ds = pydicom.dcmread(file_path, force=True)
-                    patient_name = str(ds.get("PatientName", ""))
-                    decoded = _decode_dicom_str(patient_name)
+                    patient_name = _safe_str(ds, "PatientName", "")
+                    study_desc = _safe_str(ds, "StudyDescription", "")
 
-                    has_chinese = any("\u4e00" <= c <= "\u9fff" for c in decoded)
-                    has_garbled = "\ufffd" in decoded or (
-                        patient_name
-                        and not has_chinese
-                        and any(ord(c) > 127 for c in patient_name)
-                    )
-
-                    if has_garbled and not has_chinese:
+                    if not patient_name or patient_name == "未知患者":
                         return False
-                    if has_chinese:
-                        return True
+
+                    has_chinese_name = any("\u4e00" <= c <= "\u9fff" for c in patient_name)
+                    if not has_chinese_name:
+                        return False
+
+                    if study_desc:
+                        has_chinese_desc = any("\u4e00" <= c <= "\u9fff" for c in study_desc)
+                        if not has_chinese_desc:
+                            return False
+
+                    return True
                 except Exception:
                     continue
     return False

@@ -21,13 +21,21 @@ def _decode_dicom_str(value, default_charset="GB18030") -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        if "\ufffd" in value or any(ord(c) > 127 and ord(c) < 256 for c in value):
+        has_chinese = any("\u4e00" <= c <= "\u9fff" for c in value)
+        if has_chinese:
+            return value
+        has_garbled = (
+            "\ufffd" in value
+            or any(ord(c) > 127 and ord(c) < 256 for c in value)
+            or any(0x0080 <= ord(c) <= 0x00FF and not c.isprintable() for c in value)
+        )
+        if has_garbled:
             try:
                 raw_bytes = value.encode("latin-1", errors="ignore")
                 for cs in CHINESE_CHARSETS:
                     try:
                         decoded = raw_bytes.decode(cs)
-                        if decoded and "\ufffd" not in decoded:
+                        if decoded and any("\u4e00" <= c <= "\u9fff" for c in decoded):
                             return decoded
                     except (UnicodeDecodeError, LookupError):
                         continue
@@ -37,7 +45,9 @@ def _decode_dicom_str(value, default_charset="GB18030") -> str:
     if isinstance(value, bytes):
         for cs in CHINESE_CHARSETS:
             try:
-                return value.decode(cs)
+                decoded = value.decode(cs)
+                if any("\u4e00" <= c <= "\u9fff" for c in decoded):
+                    return decoded
             except (UnicodeDecodeError, LookupError):
                 continue
         return value.decode("utf-8", errors="replace")
@@ -49,11 +59,18 @@ def _safe_str(ds, tag, default="") -> str:
         val = ds.get(tag, default)
         if val is None:
             return default
-        if hasattr(val, "__len__") and not isinstance(val, (str, bytes)):
-            if len(val) > 0:
-                val = val[0]
+        if hasattr(val, "alphabetic"):
+            alphabetic = val.alphabetic
+            if alphabetic and isinstance(alphabetic, str) and any("\u4e00" <= c <= "\u9fff" for c in alphabetic):
+                val = alphabetic
+            elif hasattr(val, "original_string"):
+                val = val.original_string
             else:
-                return default
+                val = alphabetic if alphabetic else str(val)
+        if not isinstance(val, (str, bytes)):
+            val = str(val)
+        if isinstance(val, str) and not val.strip():
+            return default
         return _decode_dicom_str(val)
     except Exception:
         return default
